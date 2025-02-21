@@ -4,6 +4,14 @@ import sys
 import pygame
 import string
 import queue
+import heapq
+import time
+import tracemalloc
+import psutil
+import os
+from collections import deque
+
+DIRECTIONS = {"u": (-1, 0), "d": (1, 0), "l": (0, -1), "r": (0, 1)}
 
 class game:
     def is_valid_value(self,char):
@@ -48,6 +56,7 @@ class game:
                 else:
                     break
         self.original_matrix = [row[:] for row in self.matrix]  # Lưu bản sao gốc
+        self.grid = self.matrix
 
     def load_matrix_from_file(self, filename):
      """Loads the matrix from the level file."""
@@ -93,6 +102,9 @@ class game:
      """Đặt lại trò chơi về trạng thái ban đầu"""
      self.matrix = [row[:] for row in self.original_matrix]  # Phục hồi ma trận
      self.queue = queue.LifoQueue()  # Xóa lịch sử di chuyển
+
+     # Chuẩn hóa lại lưới sau khi reset
+     self.normalize_grid()
 
     def load_size(self):
         x = 0
@@ -288,9 +300,11 @@ def print_game(matrix, screen):
     
     algo_button.rect.topleft = (button_x, button_y)  # Chỉnh vị trí nút thuật toán
     reset_button.rect.topleft = (button_x, button_y + 60)  # Chỉnh vị trí nút Reset
+    stop_button.rect.topleft = (button_x, button_y + 120)
 
     algo_button.draw(screen)
     reset_button.draw(screen)
+    stop_button.draw(screen)
 
 def get_key():
   while 1:
@@ -386,6 +400,328 @@ def start_game():
         print("ERROR: Invalid input. Please enter a number.")
         sys.exit(2)
 
+class SokobanSolver:
+    def normalize_grid(self):
+     """Chuẩn hóa lưới để đảm bảo tất cả các dòng có cùng số cột."""
+     max_width = max(len(row) for row in self.grid)  # Tìm số cột lớn nhất
+     for i in range(len(self.grid)):
+        if len(self.grid[i]) < max_width:
+            self.grid[i] += [" "] * (max_width - len(self.grid[i]))  # Thêm khoảng trắng
+
+    def __init__(self, grid, algorithm):
+        self.grid = [list(row) for row in grid]
+        self.normalize_grid()  # Chuẩn hóa bàn cờ trước khi xử lý
+        self.height = len(grid)
+        self.width = len(grid[0])
+        self.agent, self.boxes, self.targets = self.find_positions()
+        self.algorithm = algorithm  # Lưu thuật toán được chọn
+
+    def find_positions(self):
+     if not self.grid or len(self.grid) == 0:
+        return None, frozenset(), frozenset()
+
+     agent = None
+     boxes = set()
+     targets = set()
+
+     for r in range(self.height):
+        if r >= len(self.grid):  # Kiểm tra giới hạn hàng
+            print(f"LỖI: Hàng {r} không tồn tại trong grid!")
+            continue
+
+        for c in range(len(self.grid[r])):  # Chỉ duyệt trong giới hạn hợp lệ
+            if c >= len(self.grid[r]):  # Kiểm tra giới hạn cột
+                print(f"LỖI: Cột {c} không tồn tại trong hàng {r}!")
+                continue
+
+            if self.grid[r][c] == "@":
+                agent = (r, c)
+            elif self.grid[r][c] == "+":
+                agent = (r, c)
+                targets.add((r, c))
+            elif self.grid[r][c] == "$":
+                boxes.add((r, c))
+            elif self.grid[r][c] == "*":
+                boxes.add((r, c))
+                targets.add((r, c))
+            elif self.grid[r][c] == ".":
+                targets.add((r, c))
+
+     return agent, frozenset(boxes), frozenset(targets)
+
+    def is_goal(self, boxes):
+        return boxes == self.targets
+    
+    def heuristic(self, boxes):
+        return sum(
+            min(abs(bx - tx) + abs(by - ty) for tx, ty in self.targets)
+            for bx, by in boxes
+        )
+
+    def get_neighbors(self, state):
+        agent, boxes = state
+        neighbors = []
+
+        for action, (dr, dc) in DIRECTIONS.items():
+            new_agent = (agent[0] + dr, agent[1] + dc)
+
+            if self.grid[new_agent[0]][new_agent[1]] == "#":
+                continue
+
+            new_boxes = set(boxes)
+            move_type = action
+
+            if new_agent in boxes:
+                new_box = (new_agent[0] + dr, new_agent[1] + dc)
+                if new_box in boxes or self.grid[new_box[0]][new_box[1]] == "#":
+                    continue
+                new_boxes.remove(new_agent)
+                new_boxes.add(new_box)
+                move_type = action.upper()
+
+            neighbors.append((move_type, (new_agent, frozenset(new_boxes))))
+
+        return neighbors
+
+    def ucs(self):
+        start_time = time.time()
+        tracemalloc.start()
+
+        start_state = (self.agent, self.boxes)
+        frontier = [(0, start_state, [])]  # Hàng đợi ưu tiên theo cost
+        visited = set()
+        nodes_explored = 0
+
+        while frontier:
+            cost, (agent, boxes), path = heapq.heappop(frontier)
+            nodes_explored += 1
+
+            if self.is_goal(boxes):
+                end_time = time.time()
+                current, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+
+                steps = len(path)
+                time_taken = (end_time - start_time) * 1000
+                memory_used = peak / (1024 * 1024)
+
+                print(f"Uniform Cost Search (UCS)")
+                print(
+                    f"Steps: {steps}, Cost: {cost}, Nodes: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
+                )
+                print("Solution:", "".join(path))
+
+                return path
+
+            if (agent, boxes) in visited:
+                continue
+            visited.add((agent, boxes))
+
+            for action, next_state in self.get_neighbors((agent, boxes)):
+                new_cost = cost + 1  # UCS chỉ dùng cost thực tế
+                heapq.heappush(frontier, (new_cost, next_state, path + [action]))
+
+        tracemalloc.stop()
+        print("⛔ Không tìm thấy giải pháp!")
+        return None
+
+    def bfs(self):
+        start_time = time.time()
+        tracemalloc.start()
+
+        start_state = (self.agent, self.boxes)
+        frontier = deque([(start_state, [])])
+        visited = set()
+        nodes_explored = 0
+
+        while frontier:
+            (agent, boxes), path = frontier.popleft()
+            nodes_explored += 1
+
+            if self.is_goal(boxes):
+                end_time = time.time()
+                current, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+
+                steps = len(path)
+                time_taken = (end_time - start_time) * 1000
+                memory_used = peak / (1024 * 1024)
+
+                print(f"BFS search")
+                print(
+                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
+                )
+                print("Solution:", "".join(path))
+
+                return path
+
+            if (agent, boxes) in visited:
+                continue
+            visited.add((agent, boxes))
+
+            for action, next_state in self.get_neighbors((agent, boxes)):
+                frontier.append((next_state, path + [action]))
+
+        tracemalloc.stop()
+        print("⛔ Không tìm thấy giải pháp!")
+        return None
+
+    def dfs(self):
+        start_time = time.time()
+        tracemalloc.start()
+
+        start_state = (self.agent, self.boxes)
+        stack = [(start_state, [])]  # Stack cho DFS
+        visited = set()
+        nodes_explored = 0
+
+        while stack:
+            (agent, boxes), path = stack.pop()
+            nodes_explored += 1
+
+            if self.is_goal(boxes):
+                end_time = time.time()
+                current, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+
+                steps = len(path)
+                time_taken = (end_time - start_time) * 1000
+                memory_used = peak / (1024 * 1024)
+
+                print(f"DFS search")
+                print(
+                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
+                )
+                print("Solution:", "".join(path))
+
+                return path
+
+            if (agent, boxes) in visited:
+                continue
+            visited.add((agent, boxes))
+
+            for action, next_state in self.get_neighbors((agent, boxes)):
+                stack.append((next_state, path + [action]))  # Đẩy vào stack
+
+        tracemalloc.stop()
+        print("⛔ Không tìm thấy giải pháp!")
+        return None
+    
+    def a_star(self):
+        start_time = time.time()
+        tracemalloc.start()
+
+        start_state = (self.agent, self.boxes)
+        frontier = [(self.heuristic(self.boxes), 0, start_state, [])]
+        visited = set()
+        nodes_explored = 0
+
+        while frontier:
+            _, cost, (agent, boxes), path = heapq.heappop(frontier)
+            nodes_explored += 1
+
+            if self.is_goal(boxes):
+                end_time = time.time()
+                current, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+
+                steps = len(path)
+                weight = cost
+                time_taken = (end_time - start_time) * 1000
+                memory_used = peak / (1024 * 1024)
+
+                print(f"A* search")
+                print(
+                    f"Steps: {steps}, Weight: {weight}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
+                )
+                print("Solution:", "".join(path))
+
+                return path
+
+            if (agent, boxes) in visited:
+                continue
+            visited.add((agent, boxes))
+
+            for action, next_state in self.get_neighbors((agent, boxes)):
+                new_cost = cost + 1
+                heapq.heappush(
+                    frontier,
+                    (
+                        new_cost + self.heuristic(next_state[1]),
+                        new_cost,
+                        next_state,
+                        path + [action],
+                    ),
+                )
+
+        tracemalloc.stop()
+        print("⛔ Không tìm thấy giải pháp!")
+        return None
+    
+    def gbfs(self):
+        start_time = time.time()
+        tracemalloc.start()
+
+        start_state = (self.agent, self.boxes)
+        frontier = [(self.heuristic(self.boxes), start_state, [])]  # Chỉ dùng h(n)
+        visited = set()
+        nodes_explored = 0
+
+        while frontier:
+            _, (agent, boxes), path = heapq.heappop(frontier)
+            nodes_explored += 1
+
+            if self.is_goal(boxes):
+                end_time = time.time()
+                current, peak = tracemalloc.get_traced_memory()
+                tracemalloc.stop()
+
+                steps = len(path)
+                time_taken = (end_time - start_time) * 1000
+                memory_used = peak / (1024 * 1024)
+
+                print(f"Greedy Best-First Search (GBFS)")
+                print(
+                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
+                )
+                print("Solution:", "".join(path))
+
+                return path
+
+            if (agent, boxes) in visited:
+                continue
+            visited.add((agent, boxes))
+
+            for action, next_state in self.get_neighbors((agent, boxes)):
+                heapq.heappush(
+                    frontier,
+                    (
+                        self.heuristic(next_state[1]),
+                        next_state,
+                        path + [action],
+                    ),  # Chỉ xét h(n)
+                )
+
+        tracemalloc.stop()
+        print("⛔ Không tìm thấy giải pháp!")
+        return None
+    
+    def solve(self):
+        """Triển khai thuật toán giải Sokoban"""
+        if self.algorithm == "BFS":
+            return self.bfs()
+        elif self.algorithm == "DFS":
+            return self.dfs()
+        elif self.algorithm == "UCS":
+            return self.ucs()
+        elif self.algorithm == "A*":
+            return self.a_star()
+        elif self.algorithm == "GBFS":
+            return self.gbfs()
+        else:
+            print("Thuật toán không hợp lệ:", self.algorithm)
+            return None
+
 pygame.init()
 
 # Cấu hình màn hình
@@ -462,17 +798,26 @@ def show_menu():
         screen.blit(shadow_text, (WIDTH // 2 - title_text.get_width() // 2 + 3, 53))
         screen.blit(title_text, (WIDTH // 2 - title_text.get_width() // 2, 50))
 
+        # Lưu danh sách các vị trí của menu để xử lý chuột
+        menu_rects = []
+
         # Hiển thị menu
         for i, item in enumerate(menu_items):
             size = 60 if i == selected_item else 50  # Tăng kích thước khi chọn
-            temp_font = pygame.font.SysFont(menu_font, size)  # Sửa lỗi này
+            temp_font = pygame.font.SysFont(menu_font, size)
             color = YELLOW if i == selected_item else GRAY  # Nổi bật mục được chọn
             text = temp_font.render(item, True, color)
 
+            # Xác định vị trí vẽ menu
+            text_x = WIDTH // 2 - text.get_width() // 2
+            text_y = 200 + i * 80
+            menu_rect = pygame.Rect(text_x, text_y, text.get_width(), text.get_height())
+            menu_rects.append(menu_rect)
+
             # Hiệu ứng đổ bóng
             shadow = temp_font.render(item, True, BLACK)
-            screen.blit(shadow, (WIDTH // 2 - text.get_width() // 2 + 2, 202 + i * 80))
-            screen.blit(text, (WIDTH // 2 - text.get_width() // 2, 200 + i * 80))
+            screen.blit(shadow, (text_x + 2, text_y + 2))
+            screen.blit(text, (text_x, text_y))
 
         # Xử lý sự kiện
         for event in pygame.event.get():
@@ -484,7 +829,7 @@ def show_menu():
                     selected_item = (selected_item - 1) % len(menu_items)
                 elif event.key == pygame.K_DOWN:
                     selected_item = (selected_item + 1) % len(menu_items)
-                elif event.key == pygame.K_RETURN:  # Nhấn Enter để chọn
+                elif event.key == pygame.K_RETURN:
                     if selected_item == 0:
                         return  # Bắt đầu game
                     elif selected_item == 1:
@@ -492,6 +837,26 @@ def show_menu():
                     elif selected_item == 2:
                         pygame.quit()
                         sys.exit()
+            
+            # Xử lý sự kiện chuột
+            elif event.type == pygame.MOUSEMOTION:
+                # Kiểm tra xem con trỏ chuột có di chuyển qua mục nào không
+                for i, menu_rect in enumerate(menu_rects):
+                    if menu_rect.collidepoint(event.pos):
+                        selected_item = i  # Cập nhật mục được chọn
+            
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:  # Nhấp chuột trái
+                    for i, menu_rect in enumerate(menu_rects):
+                        if menu_rect.collidepoint(event.pos):
+                            selected_item = i  # Cập nhật mục được chọn
+                            if selected_item == 0:
+                                return  # Bắt đầu game
+                            elif selected_item == 1:
+                                show_guide()  # Gọi bảng hướng dẫn
+                            elif selected_item == 2:
+                                pygame.quit()
+                                sys.exit()
 
         pygame.display.flip()
 
@@ -522,8 +887,8 @@ docker = pygame.image.load('images/dock.png')
 background = 255, 226, 191
 
 # Kích thước nút
-BUTTON_WIDTH = 130
-BUTTON_HEIGHT = 40
+BUTTON_WIDTH = 100
+BUTTON_HEIGHT = 30
 
 # Định nghĩa lớp Button
 class Button:
@@ -544,8 +909,78 @@ class Button:
         return self.rect.collidepoint(pos)
 
 # Tạo nút
-algo_button = Button(50, 500, BUTTON_WIDTH, BUTTON_HEIGHT, PURPLE, "Algorithm", WHITE)
-reset_button = Button(600, 500, BUTTON_WIDTH, BUTTON_HEIGHT, LIGHT_BLUE, "Reset", WHITE)
+algo_button = Button(50, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, PURPLE, "Algorithm", WHITE)
+reset_button = Button(600, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, LIGHT_BLUE, "Reset", WHITE)
+stop_button = Button(600, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, LIGHT_BLUE, "Pause", WHITE)
+
+# Biến trạng thái để theo dõi menu
+menu_open = False
+selected_algorithm = None
+
+def select_algorithm():
+    global menu_open, selected_algorithm  # Ensure these variables are global
+    
+    running = True
+    screen_width, screen_height = screen.get_size()
+    board_width, board_height = 240, 230
+    board_x = (screen_width - board_width) // 2
+    board_y = (screen_height - board_height) // 2
+
+    while running:
+        if menu_open:
+            pygame.draw.rect(screen, WHITE, pygame.Rect(board_x, board_y, board_width, board_height))
+            pygame.draw.rect(screen, BLACK, pygame.Rect(board_x, board_y, board_width, board_height), 2)
+
+            button_x = board_x + (board_width - BUTTON_WIDTH) // 2  # Căn giữa theo chiều ngang
+
+            bfs_button = Button(button_x, board_y + 20, BUTTON_WIDTH, BUTTON_HEIGHT, PURPLE, "BFS", BLACK)
+            dfs_button = Button(button_x, board_y + 60, BUTTON_WIDTH, BUTTON_HEIGHT, PURPLE, "DFS", BLACK)
+            ucs_button = Button(button_x, board_y + 100, BUTTON_WIDTH, BUTTON_HEIGHT, PURPLE, "UCS", BLACK)
+            a_button = Button(button_x, board_y + 140, BUTTON_WIDTH, BUTTON_HEIGHT, PURPLE, "A*", BLACK)
+            gbfs_button = Button(button_x, board_y + 180, BUTTON_WIDTH, BUTTON_HEIGHT, PURPLE, "GBFS", BLACK)
+
+            # Vẽ từng nút riêng lẻ
+            bfs_button.draw(screen)
+            dfs_button.draw(screen)
+            ucs_button.draw(screen)
+            a_button.draw(screen)
+            gbfs_button.draw(screen)
+
+            pygame.display.flip()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                menu_open = False
+                running = False
+
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                x, y = event.pos
+                if menu_open:
+                    if bfs_button.rect.collidepoint(x, y):
+                        selected_algorithm = "BFS"
+                    elif dfs_button.rect.collidepoint(x, y):
+                        selected_algorithm = "DFS"
+                    elif ucs_button.rect.collidepoint(x, y):
+                        selected_algorithm = "UCS"
+                    elif a_button.rect.collidepoint(x, y):
+                        selected_algorithm = "A*"
+                    elif gbfs_button.rect.collidepoint(x, y):
+                        selected_algorithm = "GBFS"
+                    else:
+                        continue  # Nếu không bấm vào nút nào thì bỏ qua vòng lặp này
+                    
+                    menu_open = False  # Đóng menu
+                    running = False  # Thoát vòng lặp sau khi chọn
+
+                    # Chạy thuật toán đã chọn
+                    solver = SokobanSolver(game.grid, selected_algorithm)
+                    solution = solver.solve()
+                    
+    return selected_algorithm
 
 # Tải level
 level = start_game()
@@ -589,7 +1024,11 @@ while 1:
                 game.reset()
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
-            if reset_button.rect.collidepoint(event.pos):  # Nhấp vào nút Reset
-                game.reset()
+         if reset_button.rect.collidepoint(event.pos):  # Nhấn vào nút "Reset"
+          game.reset()  # Quay lại trạng thái ban đầu của trò chơi
+
+         if algo_button.rect.collidepoint(event.pos):   # Nhấn vào nút "Algorithm"
+          menu_open = not menu_open  # Mở/đóng menu khi nhấn vào nút "Algorithm"
+          select_algorithm()
 
     pygame.display.update()
