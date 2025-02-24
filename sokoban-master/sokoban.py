@@ -4,6 +4,8 @@ import sys
 import pygame
 import string
 import queue
+import cv2
+import numpy as np 
 import heapq
 import time
 import tracemalloc
@@ -25,71 +27,163 @@ class game:
             return True
         else:
             return False
+        
+    def get_size(self):
+        """Trả về kích thước level dưới dạng (số cột, số hàng)"""
+        if not self.matrix:
+            return 0, 0
+        return len(self.matrix[0]), len(self.matrix)
+    
+    def add_to_history(self, state):
+        """Lưu trạng thái hiện tại vào danh sách lịch sử để có thể undo."""
+        self.history.append([row[:] for row in state])  # Lưu bản sao của ma trận
+
+    def on_play_button_click(self):
+     print("Trọng số của các hòn đá:")
+     boxes = self.get_boxes()  # Lấy danh sách vị trí hộp
+     for i, (x, y) in enumerate(boxes):
+        weight = self.weights[i] if i < len(self.weights) else 1  # Trọng số mặc định là 1 nếu thiếu
+        print(f"- Hòn đá {i+1} tại ({x}, {y}) có trọng số: {weight}")
+
+    def get_weight_at_position(self, a, b):
+     """Cập nhật lại danh sách vị trí hộp và trả về trọng số của hòn đá tại (a, b)."""
+     boxes = self.get_boxes()  # Cập nhật lại danh sách vị trí hộp
+    
+     if len(self.weights) < len(boxes):
+        print(f"⚠️ Lỗi: Số lượng hộp ({len(boxes)}) lớn hơn số lượng trọng số ({len(self.weights)})!")
+        return 0  # Trả về giá trị mặc định
+    
+     for i, (x, y) in enumerate(boxes):
+        if x == a and y == b:  # Nếu tìm thấy hòn đá tại (a, b)
+            return self.weights[i] if i < len(self.weights) else 0  # Tránh truy cập ngoài phạm vi
+        
+     return 0  # Không tìm thấy hòn đá tại vị trí này
 
     def __init__(self, filename, level):
-     self.queue = queue.LifoQueue()
-     self.matrix = []
-     self.original_matrix = []  # Lưu trữ ma trận gốc để reset
-     if level < 1:
-        print(("ERROR: Level " + str(level) + " is out of range"))
-        sys.exit(1)
-     else:
-        file = open(filename, 'r')
-        level_found = False
-        for line in file:
-            row = []
-            if not level_found:
-                if "Level " + str(level) == line.strip():
-                    level_found = True
-            else:
-                if line.strip() != "":
-                    row = []
-                    for c in line:
-                        if c != '\n' and self.is_valid_value(c):
-                            row.append(c)
-                        elif c == '\n':
-                            continue
-                        else:
-                            print("ERROR: Level "+str(level)+" has invalid value "+c)
-                            sys.exit(1)
-                    self.matrix.append(row)
+        self.queue = queue.LifoQueue()
+        self.level_path = filename  
+        self.level = level
+        self.weights = []  
+        self.history = []  
+        self.matrix = []
+        self.original_matrix = []  
+
+        if level < 1:
+            print(f"ERROR: Level {level} is out of range")
+            sys.exit(1)
+
+        # Kiểm tra file có tồn tại không
+        if not os.path.exists(filename):
+            print(f"ERROR: File '{filename}' not found!")
+            sys.exit(1)
+
+        # Đọc dữ liệu từ file
+        with open(filename, 'r', encoding='utf-8') as file:
+            level_found = False
+            reading_matrix = False  # Đánh dấu khi bắt đầu đọc ma trận
+            
+            for line in file:
+                line = line.rstrip()
+
+                if not level_found:
+                    if line == f"Level {level}":
+                        level_found = True
+                elif not self.weights:
+                    # Đọc trọng số, KHÔNG kiểm tra bằng is_valid_value
+                    try:
+                        self.weights = list(map(int, line.split()))
+                    except ValueError:
+                        print(f"ERROR: Invalid weight format in Level {level}")
+                        sys.exit(1)
                 else:
-                    break
-        self.original_matrix = [row[:] for row in self.matrix]  # Lưu bản sao gốc
-        self.grid = self.matrix
+                    # Khi đến đây, bắt đầu đọc ma trận
+                    reading_matrix = True  
+                    
+                    if line:  # Nếu không phải dòng trống
+                        row = []
+                        for c in line:
+                            if self.is_valid_value(c):
+                                row.append(c)
+                            else:
+                                print(f"ERROR: Level {level} has invalid value '{c}' in matrix!")
+                                sys.exit(1)
+                        self.matrix.append(row)
+                    else:
+                        break  # Gặp dòng trống thì dừng lại
+
+        # Kiểm tra nếu thiếu dữ liệu
+        if not level_found:
+            print(f"ERROR: Level {level} not found in file")
+            sys.exit(1)
+        if not self.weights:
+            print(f"ERROR: No weights found for Level {level}")
+            sys.exit(1)
+        if not self.matrix:
+            print(f"ERROR: No matrix data found for Level {level}")
+            sys.exit(1)
+
+        self.original_matrix = [row[:] for row in self.matrix]  
+        self.grid = self.matrix  # Lưu vào grid để sử dụng sau này
 
     def load_matrix_from_file(self, filename):
-     """Loads the matrix from the level file."""
+     """Loads the matrix from the level file, including weights."""
      matrix = []
-     with open(filename, 'r') as file:
-        level_found = False
+     weights = []
+     level_found = False
+
+     with open(filename, 'r', encoding='utf-8') as file:
         for line in file:
-            row = []
+            line = line.rstrip("\n")  # Chỉ xóa ký tự xuống dòng, giữ khoảng trắng đầu
+
             if not level_found:
-                if "Level " + str(self.level) == line.strip():
+                if line.strip() == f"Level {self.level}":  # Chỉ xóa khoảng trắng cuối dòng
                     level_found = True
+            elif not weights:
+                # Đọc dòng trọng số
+                try:
+                    weights = list(map(int, line.split()))
+                except ValueError:
+                    print(f"ERROR: Invalid weight format in Level {self.level}")
+                    sys.exit(1)
             else:
-                if line.strip() != "":
-                    for c in line:
-                        if c != '\n' and self.is_valid_value(c):
-                            row.append(c)
-                        elif c == '\n':
-                            continue
-                        else:
-                            print("ERROR: Invalid value in the file " + c)
-                            sys.exit(1)
-                    matrix.append(row)
-                else:
+                if line.strip() == "":  # Dòng trống nghĩa là hết level
                     break
+
+                row = list(line)  # Giữ nguyên khoảng trắng đầu dòng
+                for c in row:
+                    if not self.is_valid_value(c):
+                        print(f"ERROR: Level {self.level} has invalid value '{c}'")
+                        sys.exit(1)
+
+                matrix.append(row)  # Chỉ append sau khi kiểm tra hợp lệ
+    
+     if not level_found:
+        print(f"ERROR: Level {self.level} not found in file")
+        sys.exit(1)
+
+     if not weights:
+        print(f"ERROR: No weights found for Level {self.level}")
+        sys.exit(1)
+
+     self.weights = weights  # Lưu trọng số vào biến của class
      return matrix
 
     def find_worker(self, matrix):
      """Finds the worker's position in the matrix."""
      for i, row in enumerate(matrix):
         for j, cell in enumerate(row):
-            if cell == 'W':  # Assuming 'W' represents the worker
+            if cell == '@':  # Assuming 'W' represents the worker
                 return (i, j)
      return None  # If worker not found
+    
+    def get_boxes(self):
+     """Trả về danh sách vị trí các hộp trong ma trận."""
+     boxes = []
+     for y, row in enumerate(self.matrix):
+        for x, cell in enumerate(row):
+            if cell in ('$','*'):  # '$' là hộp, '*' là hộp trên mục tiêu
+                boxes.append((x, y))
+     return boxes
 
     def load_level(self):
      """Tải lại level từ file."""
@@ -99,12 +193,21 @@ class game:
      self.initial_matrix = [row[:] for row in self.matrix]
 
     def reset(self):
+     global step_count, weight_count
      """Đặt lại trò chơi về trạng thái ban đầu"""
      self.matrix = [row[:] for row in self.original_matrix]  # Phục hồi ma trận
      self.queue = queue.LifoQueue()  # Xóa lịch sử di chuyển
+     step_count = 0
+     weight_count = 0
 
-     # Chuẩn hóa lại lưới sau khi reset
-     self.normalize_grid()
+     # Tìm lại vị trí của nhân vật và hộp
+     self.boxes = []
+     for i, row in enumerate(self.matrix):
+        for j, cell in enumerate(row):
+            if cell == '@':  # Nhân vật
+                self.player_x, self.player_y = j, i
+            elif cell == '$':  # Hòn đá
+                self.boxes.append((j, i))
 
     def load_size(self):
         x = 0
@@ -112,7 +215,7 @@ class game:
         for row in self.matrix:
             if len(row) > x:
                 x = len(row)
-        return (x * 32 + 180, y * 32)
+        return (x * 32 + 175, y * 32 + 60)
 
     def get_matrix(self):
         return self.matrix
@@ -162,20 +265,25 @@ class game:
         return True
 
     def move_box(self,x,y,a,b):
+        global weight_count,step_count
 #        (x,y) -> move to do
 #        (a,b) -> box to move
         current_box = self.get_content(x,y)
         future_box = self.get_content(x+a,y+b)
         if current_box == '$' and future_box == ' ':
+            weight_count += self.get_weight_at_position(x,y)
             self.set_content(x+a,y+b,'$')
             self.set_content(x,y,' ')
         elif current_box == '$' and future_box == '.':
+            weight_count += self.get_weight_at_position(x,y)
             self.set_content(x+a,y+b,'*')
             self.set_content(x,y,' ')
         elif current_box == '*' and future_box == ' ':
+            weight_count += self.get_weight_at_position(x,y)
             self.set_content(x+a,y+b,'$')
             self.set_content(x,y,'.')
         elif current_box == '*' and future_box == '.':
+            weight_count += self.get_weight_at_position(x,y)
             self.set_content(x+a,y+b,'*')
             self.set_content(x,y,'.')
 
@@ -190,24 +298,33 @@ class game:
                 self.move(movement[0] * -1,movement[1] * -1, False)
 
     def move(self,x,y,save):
+        global weight_count,step_count
         if self.can_move(x,y):
             current = self.worker()
             future = self.next(x,y)
             if current[2] == '@' and future == ' ':
                 self.set_content(current[0]+x,current[1]+y,'@')
                 self.set_content(current[0],current[1],' ')
+                weight_count += 1
+                step_count += 1
                 if save: self.queue.put((x,y,False))
             elif current[2] == '@' and future == '.':
                 self.set_content(current[0]+x,current[1]+y,'+')
                 self.set_content(current[0],current[1],' ')
+                weight_count += 1
+                step_count += 1
                 if save: self.queue.put((x,y,False))
             elif current[2] == '+' and future == ' ':
                 self.set_content(current[0]+x,current[1]+y,'@')
                 self.set_content(current[0],current[1],'.')
+                weight_count += 1
+                step_count += 1
                 if save: self.queue.put((x,y,False))
             elif current[2] == '+' and future == '.':
                 self.set_content(current[0]+x,current[1]+y,'+')
                 self.set_content(current[0],current[1],'.')
+                weight_count += 1
+                step_count += 1
                 if save: self.queue.put((x,y,False))
         elif self.can_push(x,y):
             current = self.worker()
@@ -217,47 +334,58 @@ class game:
                 self.move_box(current[0]+x,current[1]+y,x,y)
                 self.set_content(current[0],current[1],' ')
                 self.set_content(current[0]+x,current[1]+y,'@')
+                step_count += 1
                 if save: self.queue.put((x,y,True))
             elif current[2] == '@' and future == '$' and future_box == '.':
                 self.move_box(current[0]+x,current[1]+y,x,y)
                 self.set_content(current[0],current[1],' ')
                 self.set_content(current[0]+x,current[1]+y,'@')
+                step_count += 1
                 if save: self.queue.put((x,y,True))
             elif current[2] == '@' and future == '*' and future_box == ' ':
                 self.move_box(current[0]+x,current[1]+y,x,y)
                 self.set_content(current[0],current[1],' ')
                 self.set_content(current[0]+x,current[1]+y,'+')
+                step_count += 1
                 if save: self.queue.put((x,y,True))
             elif current[2] == '@' and future == '*' and future_box == '.':
                 self.move_box(current[0]+x,current[1]+y,x,y)
                 self.set_content(current[0],current[1],' ')
                 self.set_content(current[0]+x,current[1]+y,'+')
+                step_count += 1
                 if save: self.queue.put((x,y,True))
             if current[2] == '+' and future == '$' and future_box == ' ':
                 self.move_box(current[0]+x,current[1]+y,x,y)
                 self.set_content(current[0],current[1],'.')
                 self.set_content(current[0]+x,current[1]+y,'@')
+                step_count += 1
                 if save: self.queue.put((x,y,True))
             elif current[2] == '+' and future == '$' and future_box == '.':
                 self.move_box(current[0]+x,current[1]+y,x,y)
                 self.set_content(current[0],current[1],'.')
                 self.set_content(current[0]+x,current[1]+y,'@')
+                step_count += 1
                 if save: self.queue.put((x,y,True))
             elif current[2] == '+' and future == '*' and future_box == ' ':
                 self.move_box(current[0]+x,current[1]+y,x,y)
                 self.set_content(current[0],current[1],'.')
                 self.set_content(current[0]+x,current[1]+y,'+')
+                step_count += 1
                 if save: self.queue.put((x,y,True))
             elif current[2] == '+' and future == '*' and future_box == '.':
                 self.move_box(current[0]+x,current[1]+y,x,y)
                 self.set_content(current[0],current[1],'.')
                 self.set_content(current[0]+x,current[1]+y,'+')
+                step_count += 1
                 if save: self.queue.put((x,y,True))
 
 def get_max_dimensions(matrix):
     max_columns = max(len(row) for row in matrix)  # Số cột nhiều nhất
     max_rows = len(matrix)  # Số dòng nhiều nhất
     return max_rows, max_columns
+
+step_count = 0  # Đặt số bước về 0 khi bắt đầu game
+weight_count = 0
 
 def print_game(matrix, screen):
     screen.fill(background)
@@ -300,11 +428,17 @@ def print_game(matrix, screen):
     
     algo_button.rect.topleft = (button_x, button_y)  # Chỉnh vị trí nút thuật toán
     reset_button.rect.topleft = (button_x, button_y + 60)  # Chỉnh vị trí nút Reset
-    stop_button.rect.topleft = (button_x, button_y + 120)
+    play_button.rect.topleft = (button_x, button_y + 120)
 
     algo_button.draw(screen)
     reset_button.draw(screen)
-    stop_button.draw(screen)
+    play_button.draw(screen)
+
+    font = pygame.font.Font(None, 24)  
+    step_text = font.render(f"Step: {step_count}   Weight: {weight_count}", True, BLACK)  
+    step_rect = step_text.get_rect(topleft=(10, game_height + 10))  
+
+    screen.blit(step_text, step_rect)  # Vẽ số bước lên màn hình
 
 def get_key():
   while 1:
@@ -505,11 +639,14 @@ class SokobanSolver:
                 time_taken = (end_time - start_time) * 1000
                 memory_used = peak / (1024 * 1024)
 
-                print(f"Uniform Cost Search (UCS)")
-                print(
-                    f"Steps: {steps}, Cost: {cost}, Nodes: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
-                )
-                print("Solution:", "".join(path))
+                output_filename = "output/outputUCS.txt"  # Tên file output
+
+                with open(output_filename, "w", encoding="utf-8") as file:
+                    file.write("Uniform Cost Search (UCS)\n")
+                    file.write(
+                    f"Steps: {steps}, Cost: {cost}, Nodes: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}\n"
+                    )
+                    file.write(f"{''.join(path)}\n")
 
                 return path
 
@@ -547,11 +684,14 @@ class SokobanSolver:
                 time_taken = (end_time - start_time) * 1000
                 memory_used = peak / (1024 * 1024)
 
-                print(f"BFS search")
-                print(
-                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
-                )
-                print("Solution:", "".join(path))
+                output_filename = "output/outputBFS.txt"  # Tên file output
+
+                with open(output_filename, "w", encoding="utf-8") as file:
+                    file.write("BFS search\n")
+                    file.write(
+                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}\n"
+                    )
+                    file.write(f"{''.join(path)}\n")
 
                 return path
 
@@ -588,11 +728,14 @@ class SokobanSolver:
                 time_taken = (end_time - start_time) * 1000
                 memory_used = peak / (1024 * 1024)
 
-                print(f"DFS search")
-                print(
-                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
-                )
-                print("Solution:", "".join(path))
+                output_filename = "output/outputDFS.txt"  # Tên file output
+
+                with open(output_filename, "w", encoding="utf-8") as file:
+                    file.write("DFS search\n")
+                    file.write(
+                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}\n"
+                    )
+                    file.write(f"{''.join(path)}\n")
 
                 return path
 
@@ -630,11 +773,14 @@ class SokobanSolver:
                 time_taken = (end_time - start_time) * 1000
                 memory_used = peak / (1024 * 1024)
 
-                print(f"A* search")
-                print(
-                    f"Steps: {steps}, Weight: {weight}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
-                )
-                print("Solution:", "".join(path))
+                output_filename = "output/outputA_star.txt"  # Tên file output
+
+                with open(output_filename, "w", encoding="utf-8") as file:
+                    file.write("A* search\n")
+                    file.write(
+                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}\n"
+                    )
+                    file.write(f"{''.join(path)}\n")
 
                 return path
 
@@ -680,11 +826,14 @@ class SokobanSolver:
                 time_taken = (end_time - start_time) * 1000
                 memory_used = peak / (1024 * 1024)
 
-                print(f"Greedy Best-First Search (GBFS)")
-                print(
-                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}"
-                )
-                print("Solution:", "".join(path))
+                output_filename = "output/outputGBFS.txt"  # Tên file output
+
+                with open(output_filename, "w", encoding="utf-8") as file:
+                    file.write("Greedy Best-First Search (GBFS)\n")
+                    file.write(
+                    f"Steps: {steps}, Node: {nodes_explored}, Time (ms): {time_taken:.2f}, Memory (MB): {memory_used:.2f}\n"
+                    )
+                    file.write(f"{''.join(path)}\n")
 
                 return path
 
@@ -787,34 +936,47 @@ def show_guide():
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 guide_running = False  # Thoát bảng hướng dẫn
 
+# Load video nền 
+video_path = "images/video.mp4"  # Đường dẫn tới video
+cap = cv2.VideoCapture(video_path)
+
+clock = pygame.time.Clock()
 def show_menu():
     global selected_item
     while True:
-        screen.blit(background_image, (0, 0))  # Vẽ ảnh nền
+        # Đọc frame từ video
+        ret, frame = cap.read()
+        if not ret:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset video nếu chạy hết
+            continue
 
-        # Vẽ tiêu đề "SOKOBAN" trên cùng
+        # Chuyển đổi frame từ OpenCV (BGR) sang Pygame (RGB)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = np.rot90(frame)  # Xoay ảnh nếu bị sai hướng
+        frame = pygame.surfarray.make_surface(frame)
+
+        # Hiển thị video nền
+        screen.blit(pygame.transform.scale(frame, (WIDTH, HEIGHT)), (0, 0))
+
+        # Hiển thị tiêu đề "SOKOBAN"
         title_text = title_font.render("SOKOBAN", True, TITLE_COLOR)
-        shadow_text = title_font.render("SOKOBAN", True, SHADOW_COLOR)  # Hiệu ứng đổ bóng
+        shadow_text = title_font.render("SOKOBAN", True, SHADOW_COLOR)
         screen.blit(shadow_text, (WIDTH // 2 - title_text.get_width() // 2 + 3, 53))
         screen.blit(title_text, (WIDTH // 2 - title_text.get_width() // 2, 50))
 
-        # Lưu danh sách các vị trí của menu để xử lý chuột
+        # Danh sách menu
         menu_rects = []
-
-        # Hiển thị menu
         for i, item in enumerate(menu_items):
             size = 60 if i == selected_item else 50  # Tăng kích thước khi chọn
             temp_font = pygame.font.SysFont(menu_font, size)
-            color = YELLOW if i == selected_item else GRAY  # Nổi bật mục được chọn
+            color = YELLOW if i == selected_item else GRAY
             text = temp_font.render(item, True, color)
 
-            # Xác định vị trí vẽ menu
             text_x = WIDTH // 2 - text.get_width() // 2
             text_y = 200 + i * 80
             menu_rect = pygame.Rect(text_x, text_y, text.get_width(), text.get_height())
             menu_rects.append(menu_rect)
 
-            # Hiệu ứng đổ bóng
             shadow = temp_font.render(item, True, BLACK)
             screen.blit(shadow, (text_x + 2, text_y + 2))
             screen.blit(text, (text_x, text_y))
@@ -833,32 +995,29 @@ def show_menu():
                     if selected_item == 0:
                         return  # Bắt đầu game
                     elif selected_item == 1:
-                        show_guide()  # Gọi bảng hướng dẫn
+                        show_guide()  # Hiển thị hướng dẫn
                     elif selected_item == 2:
                         pygame.quit()
                         sys.exit()
-            
-            # Xử lý sự kiện chuột
             elif event.type == pygame.MOUSEMOTION:
-                # Kiểm tra xem con trỏ chuột có di chuyển qua mục nào không
                 for i, menu_rect in enumerate(menu_rects):
                     if menu_rect.collidepoint(event.pos):
-                        selected_item = i  # Cập nhật mục được chọn
-            
+                        selected_item = i
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1:  # Nhấp chuột trái
+                if event.button == 1:
                     for i, menu_rect in enumerate(menu_rects):
                         if menu_rect.collidepoint(event.pos):
-                            selected_item = i  # Cập nhật mục được chọn
+                            selected_item = i
                             if selected_item == 0:
                                 return  # Bắt đầu game
                             elif selected_item == 1:
-                                show_guide()  # Gọi bảng hướng dẫn
+                                show_guide()
                             elif selected_item == 2:
                                 pygame.quit()
                                 sys.exit()
 
         pygame.display.flip()
+        clock.tick(30)  # Giữ FPS ổn định
 
 # Gọi menu trước khi vào game
 show_menu()
@@ -911,7 +1070,7 @@ class Button:
 # Tạo nút
 algo_button = Button(50, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, PURPLE, "Algorithm", WHITE)
 reset_button = Button(600, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, LIGHT_BLUE, "Reset", WHITE)
-stop_button = Button(600, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, LIGHT_BLUE, "Pause", WHITE)
+play_button = Button(600, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, LIGHT_BLUE, "Computer", WHITE)
 
 # Biến trạng thái để theo dõi menu
 menu_open = False
@@ -981,10 +1140,92 @@ def select_algorithm():
                     solution = solver.solve()
                     
     return selected_algorithm
+    
+def read_output_file(filename):
+    try:
+        with open(filename, 'r') as file:
+            # Đọc toàn bộ các dòng
+            algorithm = file.readline().strip()  # Dòng đầu tiên: Tên thuật toán
+            info_line = file.readline().strip()  # Dòng thứ hai: Thông số
+            path = file.readline().strip()  # Dòng thứ ba: Mảng bước đi
+
+            return algorithm, info_line, path
+
+    except FileNotFoundError:
+        print(f"File not found: {filename}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+def game_start():
+    global current_scr
+    global worker
+    global worker_docked
+    global running
+    global selected_algorithm, timeout, start_time, step_count
+
+    current_scr = "Game"
+    
+    game.load_level()  # Nạp level
+    pygame.display.update()
+    
+    # Đọc dữ liệu từ file output
+    if (selected_algorithm == "BFS"):
+     algorithm, info_line, path = read_output_file('output/outputBFS.txt')
+    if (selected_algorithm == "DFS"):
+     algorithm, info_line, path = read_output_file('output/outputDFS.txt')
+    if (selected_algorithm == "UCS"):
+     algorithm, info_line, path = read_output_file('output/outputUCS.txt')
+    if (selected_algorithm == "A*"):
+     algorithm, info_line, path = read_output_file('output/outputA_star.txt')
+    if (selected_algorithm == "GBFS"):
+     algorithm, info_line, path = read_output_file('output/outputGBFS.txt')
+
+    info_font = pygame.font.Font(None, 20)
+    info_text = info_font.render(info_line, True, (255, 255, 255))
+    info_rect = info_text.get_rect(center=(400, 550))
+    screen.blit(info_text, info_rect)
+
+    # Duyệt qua từng bước trong đường đi
+    for i in path:
+        # Thực hiện kiểm tra sự kiện thoát trong mỗi lần lặp
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+                return  # Thoát hoàn toàn khỏi game nếu người dùng muốn thoát
+            
+        screen.fill((0, 0, 0))  
+        screen.blit(info_text, info_rect) 
+
+        # Thực hiện bước di chuyển
+        if i == 'U' or i == 'u':
+            game.move(0, -1, True)
+            worker = worker_up
+            worker_docked = worker_docked_up
+        elif i == 'D' or i == 'd':
+            game.move(0, 1, True)
+            worker = worker_down
+            worker_docked = worker_docked_down
+        elif i == 'L' or i == 'l':
+            game.move(-1, 0, True)
+            worker = worker_left
+            worker_docked = worker_docked_left
+        elif i == 'R' or i == 'r':
+            game.move(1, 0, True)
+            worker = worker_right
+            worker_docked = worker_docked_right
+
+        print_game(game.get_matrix(),screen)
+        pygame.display.update()
+
+        time.sleep(0.5)
+    
+    # Hiển thị thông báo khi hoàn thành
+
+    pygame.display.update()
 
 # Tải level
 level = start_game()
-game = game('levels', level)
+game = game('level.txt', level)
 
 size = game.load_size()
 screen = pygame.display.set_mode(size)
@@ -1030,5 +1271,9 @@ while 1:
          if algo_button.rect.collidepoint(event.pos):   # Nhấn vào nút "Algorithm"
           menu_open = not menu_open  # Mở/đóng menu khi nhấn vào nút "Algorithm"
           select_algorithm()
+          game_start()
+
+         if play_button.rect.collidepoint(event.pos):
+          game.on_play_button_click()
 
     pygame.display.update()
