@@ -1,0 +1,3 @@
+A* search
+Steps: 91, Node: 261614, Time (ms): 6795.75, Memory (MB): 40.62
+ldRRddddllluurRllddrrUrrruuuLLdDLdRuuuLDDrddllluuRRllddrrUrULddlluuRRuurrrdddLruuulllulldRR

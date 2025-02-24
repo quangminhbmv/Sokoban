@@ -1,0 +1,3 @@
+Uniform Cost Search (UCS)
+Steps: 112, Cost: 112, Nodes: 1007649, Time (ms): 18089.82, Memory (MB): 136.54
+rdLuuuuulldRurDDDDlluRdrrddlUruLUUUruLdlluurDldRurDDDDrruLdlUlldRRRddlUruLullddRRuLruUUruLdlluurDldRurDDDrdLddrU
