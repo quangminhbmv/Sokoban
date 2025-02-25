@@ -8,6 +8,7 @@ import cv2
 import numpy as np 
 import heapq
 import time
+import gc
 import tracemalloc
 import psutil
 import os
@@ -34,6 +35,18 @@ class game:
             return 0, 0
         return len(self.matrix[0]), len(self.matrix)
     
+    def load_map(self,level):
+        self.level = level
+
+        with open('level.txt', 'r') as file:
+            maps = file.read().split("\n\n")  # Tách các level bằng dòng trống
+
+        if 1 <= self.level <= len(maps):
+            return maps[level - 1].split("\n")  # Trả về map của level đó
+        else:
+            print("Level không hợp lệ!")
+        return None
+    
     def add_to_history(self, state):
         """Lưu trạng thái hiện tại vào danh sách lịch sử để có thể undo."""
         self.history.append([row[:] for row in state])  # Lưu bản sao của ma trận
@@ -46,17 +59,25 @@ class game:
         print(f"- Hòn đá {i+1} tại ({x}, {y}) có trọng số: {weight}")
 
     def get_weight_at_position(self, a, b):
-     """Cập nhật lại danh sách vị trí hộp và trả về trọng số của hòn đá tại (a, b)."""
-     boxes = self.get_boxes()  # Cập nhật lại danh sách vị trí hộp
+     """Lấy trọng số của hòn đá tại vị trí (a, b), đảm bảo đồng bộ danh sách hộp và trọng số."""
     
-     if len(self.weights) < len(boxes):
-        print(f"⚠️ Lỗi: Số lượng hộp ({len(boxes)}) lớn hơn số lượng trọng số ({len(self.weights)})!")
-        return 0  # Trả về giá trị mặc định
+     boxes = self.get_boxes()  # Cập nhật danh sách vị trí hộp
     
+    # Kiểm tra nếu danh sách hộp và trọng số không khớp
+     if len(self.weights) != len(boxes):
+        print(f"⚠️ Cảnh báo: Số lượng hộp ({len(boxes)}) không khớp với số lượng trọng số ({len(self.weights)})!")
+        
+        # Đảm bảo danh sách trọng số có đúng số phần tử bằng danh sách hộp
+        if len(self.weights) < len(boxes):
+            self.weights.extend([1] * (len(boxes) - len(self.weights)))  # Thêm weight mặc định
+        elif len(self.weights) > len(boxes):
+            self.weights = self.weights[:len(boxes)]  # Cắt bớt weight dư thừa
+    
+     # Duyệt danh sách hộp để tìm hộp tại vị trí (a, b)
      for i, (x, y) in enumerate(boxes):
         if x == a and y == b:  # Nếu tìm thấy hòn đá tại (a, b)
-            return self.weights[i] if i < len(self.weights) else 0  # Tránh truy cập ngoài phạm vi
-        
+            return self.weights[i]  # Trả về weight tương ứng
+    
      return 0  # Không tìm thấy hòn đá tại vị trí này
 
     def __init__(self, filename, level):
@@ -195,19 +216,80 @@ class game:
     def reset(self):
      global step_count, weight_count
      """Đặt lại trò chơi về trạng thái ban đầu"""
-     self.matrix = [row[:] for row in self.original_matrix]  # Phục hồi ma trận
-     self.queue = queue.LifoQueue()  # Xóa lịch sử di chuyển
      step_count = 0
      weight_count = 0
 
-     # Tìm lại vị trí của nhân vật và hộp
-     self.boxes = []
-     for i, row in enumerate(self.matrix):
-        for j, cell in enumerate(row):
-            if cell == '@':  # Nhân vật
-                self.player_x, self.player_y = j, i
-            elif cell == '$':  # Hòn đá
-                self.boxes.append((j, i))
+     self.queue = queue.LifoQueue() 
+     self.weights = []  
+     self.history = []  
+     self.matrix = []
+     self.original_matrix = []  
+
+     if level < 1:
+            print(f"ERROR: Level {level} is out of range")
+            sys.exit(1)
+
+        # Kiểm tra file có tồn tại không
+     if not os.path.exists(self.level_path):
+            print(f"ERROR: File '{self.level_path}' not found!")
+            sys.exit(1)
+
+        # Đọc dữ liệu từ file
+     with open(self.level_path, 'r', encoding='utf-8') as file:
+            level_found = False
+            reading_matrix = False  # Đánh dấu khi bắt đầu đọc ma trận
+            
+            for line in file:
+                line = line.rstrip()
+
+                if not level_found:
+                    if line == f"Level {level}":
+                        level_found = True
+                elif not self.weights:
+                    # Đọc trọng số, KHÔNG kiểm tra bằng is_valid_value
+                    try:
+                        self.weights = list(map(int, line.split()))
+                    except ValueError:
+                        print(f"ERROR: Invalid weight format in Level {level}")
+                        sys.exit(1)
+                else:
+                    # Khi đến đây, bắt đầu đọc ma trận
+                    reading_matrix = True  
+                    
+                    if line:  # Nếu không phải dòng trống
+                        row = []
+                        for c in line:
+                            if self.is_valid_value(c):
+                                row.append(c)
+                            else:
+                                print(f"ERROR: Level {level} has invalid value '{c}' in matrix!")
+                                sys.exit(1)
+                        self.matrix.append(row)
+                    else:
+                        break  # Gặp dòng trống thì dừng lại
+
+        # Kiểm tra nếu thiếu dữ liệu
+     if not level_found:
+            print(f"ERROR: Level {level} not found in file")
+            sys.exit(1)
+     if not self.weights:
+            print(f"ERROR: No weights found for Level {level}")
+            sys.exit(1)
+     if not self.matrix:
+            print(f"ERROR: No matrix data found for Level {level}")
+            sys.exit(1)
+
+     self.original_matrix = [row[:] for row in self.matrix]  
+     self.grid = self.matrix  # Lưu vào grid để sử dụng sau này
+
+     # Tạo lại đối tượng game với level mới
+     size = self.load_size()
+     screen = pygame.display.set_mode(size)
+
+     self.matrix = self.load_matrix_from_file(self.level_path)  
+     self.worker_position = self.find_worker(self.matrix)  # Find worker's position
+     # Lưu ma trận gốc để reset sau này
+     self.initial_matrix = [row[:] for row in self.matrix]
 
     def load_size(self):
         x = 0
@@ -264,28 +346,65 @@ class game:
                     return False
         return True
 
-    def move_box(self,x,y,a,b):
-        global weight_count,step_count
-#        (x,y) -> move to do
-#        (a,b) -> box to move
-        current_box = self.get_content(x,y)
-        future_box = self.get_content(x+a,y+b)
-        if current_box == '$' and future_box == ' ':
-            weight_count += self.get_weight_at_position(x,y)
-            self.set_content(x+a,y+b,'$')
-            self.set_content(x,y,' ')
-        elif current_box == '$' and future_box == '.':
-            weight_count += self.get_weight_at_position(x,y)
-            self.set_content(x+a,y+b,'*')
-            self.set_content(x,y,' ')
-        elif current_box == '*' and future_box == ' ':
-            weight_count += self.get_weight_at_position(x,y)
-            self.set_content(x+a,y+b,'$')
-            self.set_content(x,y,'.')
-        elif current_box == '*' and future_box == '.':
-            weight_count += self.get_weight_at_position(x,y)
-            self.set_content(x+a,y+b,'*')
-            self.set_content(x,y,'.')
+    def move_box(self, x, y, a, b):
+     global weight_count
+
+     current_box = self.get_content(x, y)
+     future_box = self.get_content(x + a, y + b)
+
+     # Lấy danh sách hộp hiện tại và đảm bảo đồng bộ với self.weights
+     boxes = self.get_boxes()
+     if len(self.weights) != len(boxes):
+        print(f"⚠️ Số lượng hộp ({len(boxes)}) không khớp với trọng số ({len(self.weights)})!")
+        return
+
+     # Tìm chỉ mục của hòn đá cần di chuyển
+     box_index = -1
+     for i, (bx, by) in enumerate(boxes):
+        if bx == x and by == y:
+            box_index = i
+            break
+
+     if box_index == -1:
+        print(f"⚠️ Không tìm thấy hòn đá tại ({x}, {y})!")
+        return
+
+     weight = self.weights[box_index]  # Trọng số của hòn đá cần di chuyển
+
+     if current_box == '$' and future_box == ' ':
+        weight_count += weight
+        self.set_content(x + a, y + b, '$')
+        self.set_content(x, y, ' ')
+     elif current_box == '$' and future_box == '.':
+        weight_count += weight
+        self.set_content(x + a, y + b, '*')
+        self.set_content(x, y, ' ')
+     elif current_box == '*' and future_box == ' ':
+        weight_count += weight
+        self.set_content(x + a, y + b, '$')
+        self.set_content(x, y, '.')
+     elif current_box == '*' and future_box == '.':
+        weight_count += weight
+        self.set_content(x + a, y + b, '*')
+        self.set_content(x, y, '.')
+
+     # Cập nhật lại danh sách vị trí hộp sau khi di chuyển
+     new_boxes = self.get_boxes()
+     new_weights = [0] * len(new_boxes)  # Tạo danh sách mới để lưu trọng số
+
+     for i, (bx, by) in enumerate(new_boxes):
+        # Nếu hộp này là hộp vừa di chuyển, gán trọng số từ hộp cũ
+        if bx == x + a and by == y + b:
+            new_weights[i] = weight
+        else:
+            # Lấy trọng số từ danh sách cũ dựa trên vị trí trước đó
+            for j, (old_x, old_y) in enumerate(boxes):
+                if bx == old_x and by == old_y:
+                    new_weights[i] = self.weights[j]
+                    break
+
+     # Cập nhật lại danh sách trọng số sau khi di chuyển
+     self.weights = new_weights
 
     def unmove(self):
         if not self.queue.empty():
@@ -304,26 +423,22 @@ class game:
             future = self.next(x,y)
             if current[2] == '@' and future == ' ':
                 self.set_content(current[0]+x,current[1]+y,'@')
-                self.set_content(current[0],current[1],' ')
-                weight_count += 1
+                self.set_content(current[0],current[1],' ')           
                 step_count += 1
                 if save: self.queue.put((x,y,False))
             elif current[2] == '@' and future == '.':
                 self.set_content(current[0]+x,current[1]+y,'+')
-                self.set_content(current[0],current[1],' ')
-                weight_count += 1
+                self.set_content(current[0],current[1],' ')            
                 step_count += 1
                 if save: self.queue.put((x,y,False))
             elif current[2] == '+' and future == ' ':
                 self.set_content(current[0]+x,current[1]+y,'@')
-                self.set_content(current[0],current[1],'.')
-                weight_count += 1
+                self.set_content(current[0],current[1],'.')             
                 step_count += 1
                 if save: self.queue.put((x,y,False))
             elif current[2] == '+' and future == '.':
                 self.set_content(current[0]+x,current[1]+y,'+')
                 self.set_content(current[0],current[1],'.')
-                weight_count += 1
                 step_count += 1
                 if save: self.queue.put((x,y,False))
         elif self.can_push(x,y):
@@ -435,7 +550,7 @@ def print_game(matrix, screen):
     play_button.draw(screen)
 
     font = pygame.font.Font(None, 24)  
-    step_text = font.render(f"Step: {step_count}   Weight: {weight_count}", True, BLACK)  
+    step_text = font.render(f"Step: {step_count}   Weight: {weight_count}    Cost: {weight_count + step_count}", True, BLACK)  
     step_rect = step_text.get_rect(topleft=(10, game_height + 10))  
 
     screen.blit(step_text, step_rect)  # Vẽ số bước lên màn hình
@@ -1070,7 +1185,7 @@ class Button:
 # Tạo nút
 algo_button = Button(50, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, PURPLE, "Algorithm", WHITE)
 reset_button = Button(600, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, LIGHT_BLUE, "Reset", WHITE)
-play_button = Button(600, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, LIGHT_BLUE, "Computer", WHITE)
+play_button = Button(600, 500, BUTTON_WIDTH + 10, BUTTON_HEIGHT + 10, LIGHT_BLUE, "Weight", WHITE)
 
 # Biến trạng thái để theo dõi menu
 menu_open = False
@@ -1231,7 +1346,22 @@ size = game.load_size()
 screen = pygame.display.set_mode(size)
 
 while 1:
-    if game.is_completed(): display_end(screen)
+    if game.is_completed(): 
+        display_end(screen)  # Hiển thị bảng thông báo kết thúc game
+        pygame.time.delay(2000)  # Dừng 2 giây để người chơi thấy thông báo
+        
+        screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        show_menu()  # Quay lại menu chính hoặc khởi động lại game       
+
+        # Chọn level mới
+        level = start_game()  # Chọn lại level từ menu
+        game.level = level
+        game.reset()  # Reset dữ liệu game để chơi lại
+
+        game.load_size()
+        print_game(game.get_matrix(),screen)
+        pygame.display.update()
+
     print_game(game.get_matrix(),screen)
 
     for event in pygame.event.get():
