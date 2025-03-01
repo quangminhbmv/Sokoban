@@ -371,6 +371,10 @@ class game:
 
      weight = self.weights[box_index]  # Trọng số của hòn đá cần di chuyển
 
+     push_sound = pygame.mixer.Sound("music/stonePush.wav")
+     if current_box in ('$','*') and future_box in (' ', '.'):
+         push_sound.play()  # 🔊 Phát âm thanh khi đẩy đá
+
      if current_box == '$' and future_box == ' ':
         weight_count += weight
         self.set_content(x + a, y + b, '$')
@@ -987,6 +991,7 @@ class SokobanSolver:
             return None
 
 pygame.init()
+pygame.mixer.init()
 
 # Cấu hình màn hình
 WIDTH, HEIGHT = 800, 600  # Kích thước tổng
@@ -1054,6 +1059,10 @@ def show_guide():
 # Load video nền 
 video_path = "images/video.mp4"  # Đường dẫn tới video
 cap = cv2.VideoCapture(video_path)
+
+# Phát nhạc nền
+pygame.mixer.music.load("music/backgroundMusic.mp3")  # Thay bằng đường dẫn file nhạc
+pygame.mixer.music.play(-1)  # -1 để nhạc lặp vô hạn
 
 clock = pygame.time.Clock()
 def show_menu():
@@ -1351,7 +1360,7 @@ while 1:
         pygame.time.delay(2000)  # Dừng 2 giây để người chơi thấy thông báo
         
         screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        show_menu()  # Quay lại menu chính hoặc khởi động lại game       
+        #show_menu()  # Quay lại menu chính hoặc khởi động lại game       
 
         # Chọn level mới
         level = start_game()  # Chọn lại level từ menu
