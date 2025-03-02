@@ -1356,6 +1356,7 @@ screen = pygame.display.set_mode(size)
 
 while 1:
     if game.is_completed(): 
+        print_game(game.get_matrix(), screen)  # Vẽ lại màn hình lần cuối
         display_end(screen)  # Hiển thị bảng thông báo kết thúc game
         pygame.time.delay(2000)  # Dừng 2 giây để người chơi thấy thông báo
         
